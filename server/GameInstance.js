@@ -1,166 +1,246 @@
-import nengi from 'nengi'
-import nengiConfig from '../common/nengiConfig'
-import PlayerCharacter from '../common/entity/PlayerCharacter'
-import Identity from '../common/message/Identity'
-import WeaponFired from '../common/message/WeaponFired'
-import CollisionSystem from '../common/CollisionSystem'
-import Obstacle from '../common/entity/Obstacle'
+import nengi from "nengi";
+import nengiConfig from "../common/nengiConfig";
+import PlayerCharacter from "../common/entity/PlayerCharacter";
+import Identity from "../common/message/Identity";
+import WeaponFired from "../common/message/WeaponFired";
+import CollisionSystem from "../common/CollisionSystem";
+import Obstacle from "../common/entity/Obstacle";
 
-import followPath from './followPath'
-import damagePlayer from './damagePlayer'
-
+import followPath from "./followPath";
+import damagePlayer from "./damagePlayer";
+import Bonus from "../common/entity/Bonus";
+import { LATENCY } from "../common/constants";
+import BonusPickedUp from "../common/message/BonusPickedUp";
 
 class GameInstance {
-    constructor() {
-        this.players = new Map()
-        this.instance = new nengi.Instance(nengiConfig, { port: 8079 })
-        this.instance.onConnect((client, clientData, callback) => {
+  constructor() {
+    this.players = new Map();
+    this.instance = new nengi.Instance(nengiConfig, { port: 8079 });
+    this.instance.onConnect((client, clientData, callback) => {
+      // create a entity for this client
+      const rawEntity = new PlayerCharacter();
 
-            // create a entity for this client
-            const rawEntity = new PlayerCharacter()
-    
-            // make the raw entity only visible to this client
-            const channel = this.instance.createChannel()
-            channel.subscribe(client)
-            channel.addEntity(rawEntity)
-            //this.instance.addEntity(rawEntity)
-            client.channel = channel
+      // make the raw entity only visible to this client
+      const channel = this.instance.createChannel();
+      channel.subscribe(client);
+      channel.addEntity(rawEntity);
+      //this.instance.addEntity(rawEntity)
+      client.channel = channel;
 
-            // smooth entity is visible to everyone
-            const smoothEntity = new PlayerCharacter()
-            smoothEntity.collidable = true
-            this.instance.addEntity(smoothEntity)
+      // smooth entity is visible to everyone
+      const smoothEntity = new PlayerCharacter();
+      smoothEntity.collidable = true;
+      this.instance.addEntity(smoothEntity);
 
-            // tell the client which entities it controls
-            this.instance.message(new Identity(rawEntity.nid, smoothEntity.nid), client)
+      // tell the client which entities it controls
+      this.instance.message(
+        new Identity(rawEntity.nid, smoothEntity.nid),
+        client
+      );
 
-            // establish a relation between this entity and the client
-            rawEntity.client = client
-            client.rawEntity = rawEntity
-            smoothEntity.client = client
-            client.smoothEntity = smoothEntity
-            client.positions = []
+      // establish a relation between this entity and the client
+      rawEntity.client = client;
+      client.rawEntity = rawEntity;
+      smoothEntity.client = client;
+      client.smoothEntity = smoothEntity;
+      client.positions = [];
 
-            // define the view (the area of the game visible to this client, all else is culled)
-            client.view = {
-                x: rawEntity.x,
-                y: rawEntity.y,
-                halfWidth: 99999,
-                halfHeight: 99999
-            }
+      // define the view (the area of the game visible to this client, all else is culled)
+      client.view = {
+        x: rawEntity.x,
+        y: rawEntity.y,
+        halfWidth: 99999,
+        halfHeight: 99999,
+      };
 
-            //this.players.set(rawEntity.nid, rawEntity)
+      //this.players.set(rawEntity.nid, rawEntity)
 
-            callback({ accepted: true, text: 'Welcome!' })
-        })
+      callback({ accepted: true, text: "Welcome!" });
+    });
 
-        this.instance.onDisconnect(client => {
-            this.instance.removeEntity(client.rawEntity)
-            this.instance.removeEntity(client.smoothEntity)
-            client.channel.destroy()
-        })
+    this.instance.onDisconnect((client) => {
+      this.instance.removeEntity(client.rawEntity);
+      this.instance.removeEntity(client.smoothEntity);
+      client.channel.destroy();
+    });
 
-        // setup a few obstacles
+    // setup a few obstacles
 
-        const obstacles = new Map()
+    const obstacles = new Map();
 
-        const obsA = new Obstacle(150, 150, 250, 150)
-        this.instance.addEntity(obsA)
-        obstacles.set(obsA.nid, obsA)
+    const obsA = new Obstacle(150, 150, 250, 150);
+    this.instance.addEntity(obsA);
+    obstacles.set(obsA.nid, obsA);
 
-        const obsB = new Obstacle(450, 600, 60, 150)
-        this.instance.addEntity(obsB)
-        obstacles.set(obsB.nid, obsB)
+    const obsB = new Obstacle(450, 600, 60, 150);
+    this.instance.addEntity(obsB);
+    obstacles.set(obsB.nid, obsB);
 
-        this.obstacles = obstacles
-    }
+    this.obstacles = obstacles;
 
-    lagCompensatedHitscanCheck(x1, y1, x2, y2, timeAgo, onHit) {
-        const area = {
-            x: (x1 + x2) / 2,
-            y: (y1 + y2) / 2,
-            halfWidth: Math.abs(x2 - x1),
-            halfHeight: Math.abs(y2 - y1)
+    const bonuses = new Map();
+
+    const bonA = new Bonus(150 + 300, 150, 30, 30);
+    this.instance.addEntity(bonA);
+    bonuses.set(bonA.nid, bonA);
+
+    const bonB = new Bonus(450 + 110, 600, 30, 30);
+    this.instance.addEntity(bonB);
+    bonuses.set(bonB.nid, bonB);
+
+    this.bonuses = bonuses;
+  }
+
+  lagCompensatedHitscanCheck(x1, y1, x2, y2, timeAgo, onHit) {
+    const area = {
+      x: (x1 + x2) / 2,
+      y: (y1 + y2) / 2,
+      halfWidth: Math.abs(x2 - x1),
+      halfHeight: Math.abs(y2 - y1),
+    };
+
+    const compensatedEntityPositions =
+      this.instance.historian.getLagCompensatedArea(timeAgo, area);
+    compensatedEntityPositions.forEach((entityProxy) => {
+      // look up the real entity
+      const realEntity = this.instance.entities.get(entityProxy.nid);
+
+      if (realEntity && realEntity.collidable) {
+        const tempX = realEntity.collider.pos.x;
+        const tempY = realEntity.collider.pos.y;
+
+        // rewind
+        realEntity.collider.pos.x = entityProxy.x;
+        realEntity.collider.pos.y = entityProxy.y;
+
+        const hit = CollisionSystem.checkLineCircle(
+          x1,
+          y1,
+          x2,
+          y2,
+          realEntity.collider
+        );
+
+        // restore
+        realEntity.collider.pos.x = tempX;
+        realEntity.collider.pos.y = tempY;
+
+        if (hit) {
+          onHit(realEntity);
+        }
+      }
+    });
+  }
+
+  update(delta, tick, now) {
+    let cmd = null;
+    while ((cmd = this.instance.getNextCommand())) {
+      const tick = cmd.tick;
+      const client = cmd.client;
+      // TODO : PICKING UP BONUSES && PLAYERS COLLIDING && BULLETS SHOOTING &&
+      // TODO :  ANIMATIONS PLAY INSTANTLY BUT WAIT FOR SERVER CONFIRM BEFORE ACTUAL RESULTS && TELEGRAPHING EFFECT (play animation and notice players stun will happen for example)
+      // TODO : fire a bullet => hide on client if hit any enemy => deal damage if hit any enemy on server
+      for (let i = 0; i < cmd.commands.length; i++) {
+        const command = cmd.commands[i];
+        const rawEntity = client.rawEntity;
+        const smoothEntity = client.smoothEntity;
+
+        if (command.protocol.name === "MoveCommand") {
+          rawEntity.processMove(command, this.obstacles);
+          //  rawEntity.checkBonusesPickUp(this.bonuses);
+          // let indexesToSplice = [];
+          if (this.bonuses) {
+            this.bonuses.forEach((bonus, i) => {
+              const collide = CollisionSystem.checkCirclePolygon(
+                rawEntity,
+                bonus
+              );
+              if (collide) {
+                // TODO : should be removed from this.bonuses
+                // indexesToSplice.push(bonus);
+                this.instance.addLocalMessage(
+                  // TODO : should use ID instead of x,y
+                  new BonusPickedUp(bonus.x, bonus.y)
+                );
+              }
+            });
+          }
+          // indexesToSplice.forEach((bonus) => {
+          //   this.bonuses.delete(bonus.nid);
+          // });
+
+          // indexesToSplice = [];
+
+          client.positions.push({
+            x: rawEntity.x,
+            y: rawEntity.y,
+            rotation: rawEntity.rotation,
+          });
+          rawEntity.weaponSystem.update(command.delta);
         }
 
-        const compensatedEntityPositions = this.instance.historian.getLagCompensatedArea(timeAgo, area)
-        compensatedEntityPositions.forEach(entityProxy => {
-            // look up the real entity
-            const realEntity = this.instance.entities.get(entityProxy.nid)
-      
-            if (realEntity && realEntity.collidable) {
-                const tempX = realEntity.collider.pos.x
-                const tempY = realEntity.collider.pos.y
+        // if (command.protocol.name === "MoveCommand") {
+        //   rawEntity.processMove(command, this.obstacles);
+        //   client.positions.push({
+        //     x: rawEntity.x,
+        //     y: rawEntity.y,
+        //     rotation: rawEntity.rotation,
+        //   });
+        //   rawEntity.weaponSystem.update(command.delta);
+        // }
 
-                // rewind
-                realEntity.collider.pos.x = entityProxy.x
-                realEntity.collider.pos.y = entityProxy.y
+        if (command.protocol.name === "FireCommand") {
+          if (rawEntity.fire()) {
+            const timeAgo = LATENCY + client.latency + 100;
 
-                const hit = CollisionSystem.checkLineCircle(x1, y1, x2, y2, realEntity.collider)
-
-                // restore
-                realEntity.collider.pos.x = tempX
-                realEntity.collider.pos.y = tempY
-
-                if (hit) {
-                    onHit(realEntity)
+            this.lagCompensatedHitscanCheck(
+              rawEntity.x,
+              rawEntity.y,
+              command.x,
+              command.y,
+              timeAgo,
+              (victim) => {
+                if (
+                  victim.nid !== rawEntity.nid &&
+                  victim.nid !== smoothEntity.nid
+                ) {
+                  damagePlayer(victim);
                 }
-            }
-        })
+              }
+            );
+
+            this.instance.addLocalMessage(
+              new WeaponFired(
+                smoothEntity.nid,
+                smoothEntity.x,
+                smoothEntity.y,
+                command.x,
+                command.y
+              )
+            );
+          }
+        }
+      }
     }
 
-    update(delta, tick, now) {
-        let cmd = null
-        while (cmd = this.instance.getNextCommand()) {
-            const tick = cmd.tick
-            const client = cmd.client
+    this.instance.clients.forEach((client) => {
+      client.view.x = client.rawEntity.x;
+      client.view.y = client.rawEntity.y;
 
-            for (let i = 0; i < cmd.commands.length; i++) {
-                const command = cmd.commands[i]
-                const rawEntity = client.rawEntity
-                const smoothEntity = client.smoothEntity
+      const smoothEntity = client.smoothEntity;
+      if (smoothEntity) {
+        const maximumMovementPerFrameInPixels = 400 * delta;
+        followPath(
+          smoothEntity,
+          client.positions,
+          maximumMovementPerFrameInPixels
+        );
+      }
+    });
 
-                if (command.protocol.name === 'MoveCommand') {
-                    rawEntity.processMove(command, this.obstacles)
-                    client.positions.push({
-                        x: rawEntity.x,
-                        y: rawEntity.y,
-                        rotation: rawEntity.rotation
-                    })
-                    rawEntity.weaponSystem.update(command.delta)
-                }
-
-                if (command.protocol.name === 'FireCommand') {
-
-                    if (rawEntity.fire()) {            
-                        const timeAgo = client.latency + 100
-
-                        this.lagCompensatedHitscanCheck(rawEntity.x, rawEntity.y, command.x, command.y, timeAgo, (victim) => {
-                            if (victim.nid !== rawEntity.nid && victim.nid !== smoothEntity.nid) {
-                                damagePlayer(victim)
-                            }
-                        })
-
-                        this.instance.addLocalMessage(new WeaponFired(smoothEntity.nid, smoothEntity.x, smoothEntity.y, command.x, command.y))
-                    }
-                }
-            }
-        } 
-
-        this.instance.clients.forEach(client => {
-            client.view.x = client.rawEntity.x
-            client.view.y = client.rawEntity.y
-
-            const smoothEntity = client.smoothEntity
-            if (smoothEntity) {
-                const maximumMovementPerFrameInPixels = 410 * delta
-                followPath(smoothEntity, client.positions, maximumMovementPerFrameInPixels)
-            }
-        })
-
-        // when instance.updates, nengi sends out snapshots to every client
-        this.instance.update()
-    }
+    // when instance.updates, nengi sends out snapshots to every client
+    this.instance.update();
+  }
 }
 
-export default GameInstance
+export default GameInstance;
